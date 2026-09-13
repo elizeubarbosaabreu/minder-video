@@ -135,10 +135,10 @@ RESOLUTIONS = {
 FPS_CHOICES = (24, 30, 60)
 
 LAYOUT = {
-    "row_h": 40,
-    "node_h": 28,
+    "row_h": 44,
+    "node_h": 30,
     "node_h_root": 46,
-    "gap": 28,
+    "gap": 32,
 }
 
 # ---------------------------------------------------------------------------
@@ -282,17 +282,44 @@ def load_map(path):
 
 
 def assign_sides(roots):
-    """Distribui os lados: filhos da raiz alternam direita/esquerda;
+    """Distribui os lados: filhos da raiz alternam direita/esquerda pelos
+    tamanhos das subárvores (quando o arquivo não define lados variados);
     níveis mais profundos herdam o lado do pai."""
+
+    def tree_h(n):  # altura = nº de folhas
+        if not n["children"]:
+            return 1
+        return sum(tree_h(c) for c in n["children"])
+
+    def balance(children):
+        kids = sorted(children, key=lambda c: tree_h(c), reverse=True)
+        h_l = h_r = 0
+        for c in kids:
+            if h_l <= h_r:
+                c["side"], h_l = "left", h_l + tree_h(c)
+            else:
+                c["side"], h_r = "right", h_r + tree_h(c)
+
     def fill(node, level, inherited):
         if node.get("side") is None:
             node["side"] = inherited
         children = node["children"]
-        if level == 0 and children and all(c.get("side") is None for c in children):
-            for i, c in enumerate(children):
-                c["side"] = "right" if i % 2 == 0 else "left"
+        if children:
+            sides = {c.get("side") for c in children}
+            uniform = len(sides) == 1  # todos iguais (ou todos ausentes)
+            if uniform:
+                if level == 0:
+                    # raiz: distribui os ramos principais entre os dois lados
+                    balance(children)
+                else:
+                    # galhos profundos seguem o lado do pai (coluna única por
+                    # lado); evita que um nó "direita" antigo do arquivo
+                    # apareça dentro de um galho esquerdo perto do centro
+                    for c in children:
+                        c["side"] = node.get("side") or c["side"]
         for c in children:
             fill(c, level + 1, node.get("side"))
+
     for r in roots:
         r.setdefault("side", None)
         fill(r, 0, None)
@@ -442,6 +469,27 @@ def static_layout(roots, cx):
     for r in roots:
         r["level"] = 0
         rec(r, 0, 0)
+
+    # Segurança: mantém os galhos longe da caixa da raiz (raiz larga + nó
+    # profundo estreito poderiam se sobrepor perto do centro).
+    margin = 26
+
+    def push_x(node, dx):
+        node["x"] += dx
+        for c in node["children"]:
+            push_x(c, dx)
+
+    for r in roots:
+        half_r = r["w"] / 2
+        stack = list(r["children"])
+        seen = 0
+        while seen < len(stack):
+            node = stack[seen]; seen += 1
+            stack.extend(node["children"])
+            sign = 1 if node["x"] >= r["x"] else -1
+            need = r["x"] + sign * (half_r + node["w"] / 2 + margin)
+            if sign * node["x"] < sign * need:
+                push_x(node, need - node["x"])
     return ref
 
 
@@ -451,7 +499,7 @@ def static_layout(roots, cx):
 
 
 class MapVideoRenderer:
-    def __init__(self, roots, colors, width, height, fps, step, fade, pause):
+    def __init__(self, roots, colors, width, height, fps, step, fade, pause, presentation=True):
         self.roots = roots
         self.colors = colors
         self.width = width
@@ -460,6 +508,7 @@ class MapVideoRenderer:
         self.step = max(fade, step)
         self.fade = fade
         self.pause = pause
+        self.presentation = presentation
 
         self.bg = to_rgb(colors.get("background"), (248, 250, 251))
         self.fg = to_rgb(colors.get("foreground"), (55, 65, 81))
@@ -509,6 +558,56 @@ class MapVideoRenderer:
         out_h = bh * self.scale
         self.off_x = (self.width - out_w) / 2 - min_x * self.scale
         self.off_y = (self.height - out_h) / 2 - min_y * self.scale
+        self.fit_scale = self.scale
+        self.fit_cx = min_x + bw / 2
+        self.fit_cy = min_y + bh / 2
+
+    def _box_of(self, n):
+        return (n["x"] - n["w"] / 2, n["x"] + n["w"] / 2,
+                n["y"] - n["h"] / 2, n["y"] + n["h"] / 2)
+
+    def _union_target(self, a, b):
+        """Enquadra a união das caixas dos dois nós vizinhos na animação, de
+        forma que o que já está na tela continue visível durante a transição,
+        mantendo o zoom próximo ao ramo em foco."""
+        pa, pb = self._box_of(a), self._box_of(b)
+        mnx = min(pa[0], pb[0]); mxx = max(pa[1], pb[1])
+        mny = min(pa[2], pb[2]); mxy = max(pa[3], pb[3])
+        bw = max(30, mxx - mnx)
+        bh = max(30, mxy - mny)
+        m = 90
+        s = min((self.width - 2 * m) / bw, (self.height - 2 * m) / bh)
+        s = min(max(s, self.fit_scale), self.fit_scale * 8)
+        return ((mnx + mxx) / 2, (mny + mxy) / 2, s)
+
+    def _camera(self, t):
+        """Zoom guiado: título em tela cheia → navega pelos ramos mantendo o
+        anterior visível → mapa completo, exibido apenas nos quadros finais
+        (último nó + pausa)."""
+        if not self.presentation:
+            return
+        last = len(self.order) - 1
+        idx = min(last, int(t / self.step))
+        if idx >= last:
+            s = self.fit_scale
+            self.scale = s
+            self.off_x = self.width / 2 - self.fit_cx * s
+            self.off_y = self.height / 2 - self.fit_cy * s
+            return
+        u = max(0.0, min(1.0, (t - idx * self.step) / self.step))
+        if idx == 1 and self.step > 0.7:
+            hold = 0.6
+            u = max(0.0, min(1.0, (t - hold) / (self.step - hold)))
+        e = u * u * (3 - 2 * u)
+        pa = self.order[max(0, idx - 2)]
+        ca = self._union_target(pa, self.order[max(0, idx - 1)])
+        cb = self._union_target(self.order[max(0, idx - 1)], self.order[idx])
+        s = ca[2] + (cb[2] - ca[2]) * e
+        cx = ca[0] + (cb[0] - ca[0]) * e
+        cy = ca[1] + (cb[1] - ca[1]) * e
+        self.scale = s
+        self.off_x = self.width / 2 - cx * s
+        self.off_y = self.height / 2 - cy * s
 
     def w2x(self, wx):
         return wx * self.scale + self.off_x
@@ -606,6 +705,7 @@ class MapVideoRenderer:
         return pts
 
     def frame(self, t):
+        self._camera(t)
         img = Image.new("RGBA", (self.width, self.height), self.bg + (255,))
         draw = ImageDraw.Draw(img)
 
@@ -679,13 +779,14 @@ class _NodeGeom:
 
 
 def render_video(roots, colors, out, width=1280, height=720, fps=30,
-                 step=0.45, fade=0.35, pause=2.0, progress_cb=None):
+                 step=0.45, fade=0.35, pause=2.0, presentation=True, progress_cb=None):
     if Image is None or np is None:
         raise RuntimeError(deps_error("(Pillow/numpy)"))
     if VideoClip is None:
         raise RuntimeError(deps_error("(moviepy)"))
     static_layout(roots, 0)  # calcula x/y/w/h dos nós em coordenadas de mundo
-    renderer = MapVideoRenderer(roots, colors, width, height, fps, step, fade, pause)
+    renderer = MapVideoRenderer(roots, colors, width, height, fps, step, fade, pause,
+                                presentation=presentation)
     total = renderer.total
 
     def make_frame(t):
@@ -731,6 +832,9 @@ def cli(argv=None):
                         help="segundos entre a entrada de cada nó (padrão: %(default)s)")
     parser.add_argument("--pausa-final", type=float, default=2.0,
                         help="segundos exibindo o mapa completo (padrão: %(default)s)")
+    parser.add_argument("--camera", choices=("apresentacao", "panoramica"), default="apresentacao",
+                        help="apresentacao: título em tela cheia, navega pelos ramos e só abre o mapa "
+                             "completo no final; panoramica: vista fixa do mapa inteiro (padrão: %(default)s)")
     parser.add_argument("--fade", type=float, default=0.35,
                         help="duração da transição de entrada de cada nó (padrão: %(default)s)")
     parser.add_argument("--largura", type=int, default=1280, help="largura do vídeo em pixels")
@@ -777,6 +881,7 @@ def cli(argv=None):
     render_video(roots, colors, out,
                  width=args.largura, height=args.altura, fps=args.fps,
                  step=args.tempo_por_no, fade=args.fade, pause=args.pausa_final,
+                 presentation=(args.camera == "apresentacao"),
                  progress_cb=lambda p: _show_progress(p, out))
     print("")
 
@@ -886,6 +991,15 @@ class MindMapVideoApp:
         self.var_ext = tk.StringVar(value="MP4")
         ttk.Combobox(row2, state="readonly", values=["MP4", "WEBM"],
                      textvariable=self.var_ext, width=8).grid(row=0, column=7, padx=(2, 0))
+
+        row3 = ttk.Frame(opts)
+        row3.pack(fill=tk.X, pady=2)
+        self.var_pres = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            row3,
+            text="Apresentação — título em tela cheia, navega pelos ramos e só abre o mapa completo no final",
+            variable=self.var_pres,
+        ).pack(side=tk.LEFT)
 
         self.lbl_total = ttk.Label(root, text="", anchor=tk.W, padding=(10, 0))
         self.lbl_total.pack(side=tk.TOP, fill=tk.X)
@@ -1031,6 +1145,7 @@ class MindMapVideoApp:
                 render_video(self.roots, colors, out,
                              width=width, height=height, fps=fps,
                              step=step, fade=fade, pause=pause,
+                             presentation=self.var_pres.get(),
                              progress_cb=lambda p: self._progress(out, p))
                 self.root.after(0, self._done_video, out)
             except Exception as exc:
