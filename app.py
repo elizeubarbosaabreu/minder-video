@@ -499,7 +499,7 @@ def static_layout(roots, cx):
 
 
 class MapVideoRenderer:
-    def __init__(self, roots, colors, width, height, fps, step, fade, pause, presentation=True):
+    def __init__(self, roots, colors, width, height, fps, step, fade, pause, presentation=True, borders=False):
         self.roots = roots
         self.colors = colors
         self.width = width
@@ -509,6 +509,7 @@ class MapVideoRenderer:
         self.fade = fade
         self.pause = pause
         self.presentation = presentation
+        self.borders = borders
 
         self.bg = to_rgb(colors.get("background"), (248, 250, 251))
         self.fg = to_rgb(colors.get("foreground"), (55, 65, 81))
@@ -765,9 +766,10 @@ class _NodeGeom:
             text_size = 20 * self.k
             fill_text = r.root_fg + (alpha,)
         else:
-            outline = r.conn + (alpha,)
-            radius = min(7, self.h * 0.3)
-            draw.rounded_rectangle((x0, y0, x1, y1), radius=radius, fill=None, outline=outline, width=max(1, int(2 * r.scale)))
+            if r.borders:
+                outline = r.conn + (alpha,)
+                radius = min(7, self.h * 0.3)
+                draw.rounded_rectangle((x0, y0, x1, y1), radius=radius, fill=None, outline=outline, width=max(1, int(2 * r.scale)))
             text_size = 13.5 * self.k
             fill_text = r.fg + (alpha,)
         r.draw_text(draw, x, y, n["text"], text_size, fill_text, bold=is_root)
@@ -779,14 +781,14 @@ class _NodeGeom:
 
 
 def render_video(roots, colors, out, width=1280, height=720, fps=30,
-                 step=0.45, fade=0.35, pause=2.0, presentation=True, progress_cb=None):
+                 step=0.45, fade=0.35, pause=2.0, presentation=True, borders=False, progress_cb=None):
     if Image is None or np is None:
         raise RuntimeError(deps_error("(Pillow/numpy)"))
     if VideoClip is None:
         raise RuntimeError(deps_error("(moviepy)"))
     static_layout(roots, 0)  # calcula x/y/w/h dos nós em coordenadas de mundo
     renderer = MapVideoRenderer(roots, colors, width, height, fps, step, fade, pause,
-                                presentation=presentation)
+                                presentation=presentation, borders=borders)
     total = renderer.total
 
     def make_frame(t):
@@ -835,6 +837,8 @@ def cli(argv=None):
     parser.add_argument("--camera", choices=("apresentacao", "panoramica"), default="apresentacao",
                         help="apresentacao: título em tela cheia, navega pelos ramos e só abre o mapa "
                              "completo no final; panoramica: vista fixa do mapa inteiro (padrão: %(default)s)")
+    parser.add_argument("--bordas", action="store_true",
+                        help="mantém as caixas (bordas) ao redor dos galhos (padrão: sem bordas)")
     parser.add_argument("--fade", type=float, default=0.35,
                         help="duração da transição de entrada de cada nó (padrão: %(default)s)")
     parser.add_argument("--largura", type=int, default=1280, help="largura do vídeo em pixels")
@@ -882,6 +886,7 @@ def cli(argv=None):
                  width=args.largura, height=args.altura, fps=args.fps,
                  step=args.tempo_por_no, fade=args.fade, pause=args.pausa_final,
                  presentation=(args.camera == "apresentacao"),
+                 borders=args.bordas,
                  progress_cb=lambda p: _show_progress(p, out))
     print("")
 
@@ -1000,6 +1005,12 @@ class MindMapVideoApp:
             text="Apresentação — título em tela cheia, navega pelos ramos e só abre o mapa completo no final",
             variable=self.var_pres,
         ).pack(side=tk.LEFT)
+        self.var_borders = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            row3,
+            text="Bordas nos galhos",
+            variable=self.var_borders,
+        ).pack(side=tk.LEFT, padx=(16, 0))
 
         self.lbl_total = ttk.Label(root, text="", anchor=tk.W, padding=(10, 0))
         self.lbl_total.pack(side=tk.TOP, fill=tk.X)
