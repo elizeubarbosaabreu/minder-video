@@ -36,9 +36,25 @@ except ImportError:  # ambientes sem interface
 try:
     import numpy as np
     from PIL import Image, ImageDraw, ImageFont
+except ImportError:
+    np = Image = ImageDraw = ImageFont = None
+
+try:
     from moviepy import VideoClip
 except ImportError:
-    np = Image = ImageDraw = ImageFont = VideoClip = None
+    VideoClip = None
+
+
+def deps_error(exc_name=""):
+    return (
+        "Faltam dependências para gerar o vídeo%s.\n"
+        "Rode no ambiente virtual do projeto:\n"
+        "\n"
+        "    source .venv/bin/activate      (Windows: .venv\\Scripts\\activate)\n"
+        "    pip install -r requirements.txt\n"
+        "\n"
+        "Depois execute novamente: python app.py (ou 'minder-video')."
+    ) % (" " + exc_name if exc_name else "")
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +347,8 @@ def load_font(name, size, bold=False):
 
 
 def _draw_ref():
+    if Image is None or ImageDraw is None:
+        raise RuntimeError(deps_error("(Pillow)"))
     img = Image.new("RGB", (8, 8))
     return ImageDraw.Draw(img)
 
@@ -662,6 +680,10 @@ class _NodeGeom:
 
 def render_video(roots, colors, out, width=1280, height=720, fps=30,
                  step=0.45, fade=0.35, pause=2.0, progress_cb=None):
+    if Image is None or np is None:
+        raise RuntimeError(deps_error("(Pillow/numpy)"))
+    if VideoClip is None:
+        raise RuntimeError(deps_error("(moviepy)"))
     static_layout(roots, 0)  # calcula x/y/w/h dos nós em coordenadas de mundo
     renderer = MapVideoRenderer(roots, colors, width, height, fps, step, fade, pause)
     total = renderer.total
@@ -724,8 +746,8 @@ def cli(argv=None):
             print("%5d x %5d  %s" % (w, h, name))
         return
 
-    if np is None:
-        sys.stderr.write("Faltam dependências: pip install -r requirements.txt\n")
+    if np is None or Image is None or VideoClip is None:
+        sys.stderr.write(deps_error() + "\n")
         sys.exit(1)
 
     if not args.entrada:
@@ -819,7 +841,8 @@ class MindMapVideoApp:
         ttk.Button(toolbar, text="Carregar texto indentado...", command=self.load_text_file).pack(side=tk.LEFT, padx=(6, 0))
         self.lbl_file = ttk.Label(toolbar, text="Nenhum arquivo carregado", anchor=tk.W)
         self.lbl_file.pack(side=tk.LEFT, padx=(12, 0), fill=tk.X, expand=True)
-        ttk.Button(toolbar, text="Gerar vídeo", command=self.generate).pack(side=tk.RIGHT)
+        self.btn_generate = ttk.Button(toolbar, text="Gerar vídeo", command=self.generate)
+        self.btn_generate.pack(side=tk.RIGHT)
 
         opts = ttk.LabelFrame(root, text="Opções do vídeo", padding=(10, 8))
         opts.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(0, 4))
@@ -888,6 +911,12 @@ class MindMapVideoApp:
 
         for var in (self.var_step, self.var_fade, self.var_pause):
             var.trace_add("write", lambda *_: self.update_estimate())
+
+        if Image is None or np is None or VideoClip is None:
+            self.btn_generate.state(["disabled"])
+            self.status.config(
+                text="Dependências ausentes — rode no venv: source .venv/bin/activate && pip install -r requirements.txt"
+            )
 
     def set_file(self, path):
         self.current_path = path
