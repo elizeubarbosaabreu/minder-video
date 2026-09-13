@@ -759,10 +759,11 @@ class _NodeGeom:
         x0, y0, x1, y1 = x - half_w, y - half_h, x + half_w, y + half_h
         is_root = self.level == 0
         if is_root:
+            # Título SEMPRE sem borda/contorno, mesmo quando --bordas está ativo
+            # para os galhos: o título tem só o preenchimento suave.
             fill = r.root_bg + (alpha,)
-            outline = r.root_fg + (alpha,)
             radius = min(11, self.h * 0.26)
-            draw.rounded_rectangle((x0, y0, x1, y1), radius=radius, fill=fill, outline=outline, width=max(2, int(3 * r.scale)))
+            draw.rounded_rectangle((x0, y0, x1, y1), radius=radius, fill=fill, outline=None)
             text_size = 20 * self.k
             fill_text = r.root_fg + (alpha,)
         else:
